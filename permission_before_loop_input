@@ -1,0 +1,138 @@
+from pathlib import Path
+SANDBOX = Path("sandbox").resolve()
+
+def safe_path(user_path: str) -> Path:
+    full = (SANDBOX / user_path).resolve()   # collapses .. and follows symlinks
+    if not full.is_relative_to(SANDBOX):
+        raise ValueError("path is outside the sandbox")
+    return full
+
+print(safe_path("user_data.txt"))
+
+DESTRUCTIVE = {"delete_file"}
+
+
+import json
+from typing import Literal
+import json
+import os
+from openai import OpenAI
+
+def list_files() -> list[str]:
+    return os.listdir(SANDBOX)
+
+def delete_file(path: str) -> str:
+    full = safe_path(path)
+    if not full.exists():
+        return f"Error: file {path} does not exist"
+    if not full.is_file():
+        return f"Error: {path} is not a file"
+    full.unlink()
+    return f"Deleted {path}"
+
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "list_files",
+        "description": "List files in the sandbox directory",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+}, {
+    "type": "function",
+    "function": {
+        "name": "delete_file",
+        "description": "Delete a file in the sandbox directory",
+        "parameters": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+}]
+
+available_functions = {
+    "list_files": list_files,
+    "delete_file": delete_file
+}
+
+
+client = OpenAI(
+    base_url="https://api.groq.com/openai/v1",
+    api_key=os.environ["GROQ_API_KEY"],
+)
+
+system_message = {"role": "system", "content": 
+                  "Only use the provided tools. If a request needs an action you have no tool for, say so plainly. "
+                  "Use your tools for anything they can do, and say clearly what you can’t do"}
+
+weather_prompt = "What's the weather in Tunis?"
+add_numbers_promptt = "Add 5 and 7"
+double_tool = "What’s the weather in Tunis, and what’s 5 plus 7?"
+non_int_add = "Add 2.5 and 3"
+messages = [system_message, {"role": "user", "content": "Delete all the .tmp files"}]
+response = client.chat.completions.create(
+    model="openai/gpt-oss-120b", messages=messages, tools=tools
+)
+
+# print(response.choices[0].message)
+
+msg = response.choices[0].message
+
+limit = 0
+
+def execute_tool(call):
+    print(call.function.name, call.function.arguments)
+    name = call.function.name
+    
+    if name not in available_functions:
+        return f"Error: unknown tool '{name}'. Available: {list(available_functions)}"
+    try:
+        args = json.loads(call.function.arguments)
+    except json.JSONDecodeError:
+        return "Error: arguments were not valid JSON."
+    
+    if name in DESTRUCTIVE:
+        full = safe_path(args["path"])
+        if not full.exists():
+            return f"Error: file {args['path']} does not exist"
+        if not full.is_file():
+            return f"Error: {args['path']} is not a file"
+
+            
+        answer = input(f"Model wants to run {full}. Allow? [y/N] ")
+        if answer.strip().lower() != "y":
+            return ("Error: the user denied deleting this specific file. "
+        "Do not retry this file. Tell the user it was skipped and ask "
+        "whether to continue with the other files.")
+    
+    try:
+        return str(available_functions[name](**args))
+    except Exception as e:
+        return f"Error: {name} failed with {type(e).__name__}: {e}"
+
+while msg.tool_calls and limit < 4:  # Prevent infinite loops
+    limit += 1
+    messages.append(msg)  # keep the model's request in history
+    for call in msg.tool_calls:
+        result = execute_tool( call)
+        messages.append({
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": result,
+        })
+    final = client.chat.completions.create(
+        model="openai/gpt-oss-120b", messages=messages, tools=tools
+    )
+    msg = final.choices[0].message
+
+if msg.tool_calls:
+    print("Stopped: too many tool rounds.")
+
+if (limit >0):
+    print("final tooling result:", msg.content)
+else:
+    print("final result:", msg.content)

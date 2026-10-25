@@ -82,6 +82,28 @@ def chunk_paragraphs(text: str, max_chars: int, overlap_sentences: int) -> list[
 
     return chunks
 
+def chunk_by_section(text, max_chars, overlap_sentences):
+    parts = [p.strip() for p in re.split(r"\n\s*\n", text.strip())]
+    sections = {}                       # heading -> list of paragraphs (keeps order)
+    heading = "none"
+    for p in parts:
+        if len(p) < 60 and not re.search(r"[.!?]$", p):
+            heading = p                 # a new section starts
+        else:
+            sections.setdefault(heading, []).append(p)
+
+    out = []                            # list of (chunk_text, section)
+    for heading, paras in sections.items():
+        prefix = f"{heading}\n" if heading != "none" else ""
+        budget = max_chars - len(prefix)
+        for c in chunk_paragraphs("\n\n".join(paras), budget, overlap_sentences):
+            out.append((prefix + c, heading))
+    return out
+
+pairs = chunk_by_section(DOC, 300, 1)
+chunks = [c for c, _ in pairs]
+metadatas = [{"section": s, "chunk_index": i} for i, (_, s) in enumerate(pairs)]
+
 
 def attach_headings(text: str) -> str:
     parts = [p.strip() for p in re.split(r"\n\s*\n", text.strip())]
@@ -109,9 +131,15 @@ def search(query: str, index, k: int = 3):
 
 
 # -------------------------------------------------------------- Indexes
-DOC_WITH_HEADINGS = attach_headings(DOC)
+DOC_WITH_HEADINGS = attach_headings(DOC) 
 
-chunks, vecs = make_index(chunk_paragraphs(DOC_WITH_HEADINGS, 300, 1))
+# chunks, vecs = make_index(chunk_paragraphs(DOC_WITH_HEADINGS, 300, 1))  there is a bug with
+#  this the header is not attached to the paragraphs that are long
+
+chunks, vecs = make_index(
+    [chunk for chunk, _ in chunk_by_section(DOC, 300, 1)]
+)
+
 
 import chromadb
 
@@ -167,7 +195,8 @@ indexes = {
     # "fixed 200/1 (your values)": make_index(chunk_fixed(DOC, size=200, overlap=1)),
     # "paragraph 300/1": make_index(chunk_paragraphs(DOC, 300, 1)),
     # "paragraph 200/1 (your values)": make_index(chunk_paragraphs(DOC, 200, 1)),
-    "paragraph+heading 300/1": make_index(chunk_paragraphs(DOC_WITH_HEADINGS, 300, 1)),
+    # "paragraph+heading 300/1": make_index(chunk_paragraphs(DOC_WITH_HEADINGS, 300, 1)),
+    "by_section 300/1 (same chunks as Chroma)": make_index(chunks),
     # "paragraph 900/1": make_index(chunk_paragraphs(DOC, 900, 1)),
     # "whole doc": make_index([DOC]),
 }
@@ -189,13 +218,25 @@ for name, idx in indexes.items():
         print(f"           -> {text[:90]!r}")
 
 
-print(f"\n=== Chroma DB : {len(vecs[0])} chunks")
+print(f"\n=== Chroma DB: {len(chunks)} chunks built, {collection.count()} stored")
+
 for q in queries:
     score, text, meta = chroma_search(q)[0]
     print(f"  {score:.4f} | {q}")
     print(f"           -> {text[:90]!r}")
 
+print(f"\n=== Chroma DB with section")
 
+warranty_query = "What isn't covered by the warranty?"
+
+for section in [None, "Warranty", "Returns and Refunds"]:
+    results = chroma_search(warranty_query, k=5, section=section)
+    print(f"\nsection={section!r}: {len(results)} result(s)")
+    for score, text, meta in results:
+        print(f"  {score:.4f} | {meta['section']} | {text[:60]!r}")
+
+for m in collection.get()["metadatas"]:
+    print(f"  {m['section']}")
 
 # query = "What are the conditions for returning something?"
 
